@@ -2,17 +2,17 @@ import os
 import json
 import torch
 import transformers
-from transformers import AutoTokenizer, AutoModelForSequenceClassification  # 필요 없으면 나중에 삭제해도 됨
 
-from Moderation_API import (
+from moderator_guard.classifier.core import (
     get_guard_resources,
-    classify_prompt as guard_classify_internal,
+    classify_prompt as guard_classify_prompt,
 )
 
 # =========================
-# 0) Hugging Face 토큰 설정
+# 0) Hugging Face Token Setup
 # =========================
-HF_TOKEN = "발급한 토큰으로 바꾸기"  # ⚠ 깃에 올릴 땐 빼기!
+# ⚠ IMPORTANT: Replace with your actual Hugging Face token and remove from version control!
+HF_TOKEN = "YOUR_HF_TOKEN_HERE"
 
 os.environ["HF_TOKEN"] = HF_TOKEN
 os.environ["HF_HUB_TOKEN"] = HF_TOKEN
@@ -20,66 +20,65 @@ os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_TOKEN
 
 
 # =========================
-# 1) 왜곡 판별기 (다른 사람이 만든 모델을 붙이는 자리)
+# 1) Distortion Classifier (Integration point for the guard model)
 # =========================
 """
-여기서는 '정상 / 비정상'을 판별하는 분류기를 로딩하고,
-입력 프롬프트를 넣어 라벨과 신뢰도를 돌려주는 인터페이스만 정의한다.
+This section loads the 'normal / abnormal' classifier and defines
+an interface to return a label and confidence for a given prompt.
 
-다른 사람이 만든 분류기 구조에 맞게
-- load_cls_model()
-- classify_prompt()
-두 함수만 구현하면, 아래 생성 파이프라인은 그대로 쓸 수 있다.
+By implementing only the two functions below (`load_cls_model` and `classify_prompt`)
+to match the structure of another person's classifier, the generation
+pipeline below can be used as is.
 """
 
 
 def load_cls_model():
     """
-    우리 쪽 가드 모델(Moderation_API.py)을 로딩하는 부분.
+    Loads our guard model (from moderator_guard.classifier.core).
 
-    - get_guard_resources()를 통해
-      (nli_clf, fact_texts, fact_embs)를 한 번만 메모리에 올린다.
-    - 이 함수는 (tokenizer, model) 튜플을 리턴해야 하므로,
-      편의상 tokenizer 자리에 nli_clf, model 자리에 (fact_texts, fact_embs)를 넣어둔다.
+    - `get_guard_resources()` loads (nli_clf, fact_texts, fact_embs) into memory once.
+    - Since this function must return a (tokenizer, model) tuple,
+      we conveniently place nli_clf in the tokenizer spot and
+      (fact_texts, fact_embs) in the model spot.
     """
     nli_clf, fact_texts, fact_embs = get_guard_resources()
 
-    # 아래 튜플은 main 쪽에서 cls_tokenizer, cls_model 변수로 받게 됨
-    # cls_tokenizer → nli_clf
-    # cls_model     → (fact_texts, fact_embs)
+    # The tuple below will be received as cls_tokenizer, cls_model in the main block
+    # cls_tokenizer -> nli_clf
+    # cls_model     -> (fact_texts, fact_embs)
     return nli_clf, (fact_texts, fact_embs)
 
 
 def classify_prompt(prompt: str, cls_tokenizer, cls_model):
     """
-    우리 가드 모델의 classify_prompt()를 감싸서
-    - label: "정상" / "비정상"
+    A wrapper around our guard model's classify_prompt to act as an adapter,
+    returning in the format:
+    - label: "Normal" / "Abnormal"
     - confidence: float
-    형태로 반환하는 어댑터 역할을 한다.
 
-    cls_tokenizer: load_cls_model()에서 넘긴 nli_clf
-    cls_model    : load_cls_model()에서 넘긴 (fact_texts, fact_embs)
+    cls_tokenizer: The nli_clf passed from load_cls_model()
+    cls_model    : The (fact_texts, fact_embs) passed from load_cls_model()
     """
 
     nli_clf = cls_tokenizer
     fact_texts, fact_embs = cls_model
 
-    # Moderation_API.classify_prompt() 호출
-    res = guard_classify_internal(
+    # Call the core classification function
+    res = guard_classify_prompt(
         prompt,
         nli_clf=nli_clf,
         fact_texts=fact_texts,
         fact_embs=fact_embs,
     )
 
-    # harmful 여부를 distortion 라벨로 매핑
+    # Map harmful status to the distortion label
     if res.get("in_domain", False) and res.get("harmful", False):
-        label = "비정상"
+        label = "Abnormal"
     else:
-        # 도메인 밖이거나 harmful=False 인 경우 모두 "정상"으로 취급
-        label = "정상"
+        # Treat as "Normal" if out of domain or not harmful
+        label = "Normal"
 
-    # confidence는 CONTRADICT 확률 그대로 사용 (0~1)
+    # Use the CONTRADICT probability as confidence (0-1)
     confidence = float(res.get("max_contradict_prob", 0.0))
 
     return label, confidence
@@ -176,33 +175,42 @@ def generate_rewritten_prompt(prompt: str, distortion: str) -> str:
 
 
 # =========================
-# 3) 엔드 투 엔드 파이프라인 (질문 교정만)
+# 3) End-to-End Pipeline (Question Rewriting Only)
 # =========================
 
 if __name__ == "__main__":
-    # 🔧 다른 사람이 만든 분류기 로딩 부분
+    # This is the main execution block for the end-to-end prompt rewriting pipeline.
+    # The pipeline consists of two main stages:
+    # 1. Classification: The input prompt is classified as "Normal" or "Abnormal"
+    #    by our custom guard model.
+    # 2. Generation: Based on the classification, a new, rewritten prompt is generated
+    #    by a large language model (Llama 3).
+
+    # Load the classifier model and resources.
+    # This is done once at the start to avoid reloading for every prompt.
     cls_tokenizer, cls_model = load_cls_model()
     print("Device set to use", gen_pipe.device)
 
     while True:
-        user_prompt = input("\n프롬프트를 입력하세요 (종료: q): ").strip()
+        user_prompt = input("\nEnter a prompt (or 'q' to quit): ").strip()
 
         if user_prompt.lower() == "q":
-            print("종료합니다.")
+            print("Exiting.")
             break
 
-        if user_prompt == "":
-            print("⚠ 빈 프롬프트입니다. 다시 입력해 주세요.")
+        if not user_prompt:
+            print("⚠ Empty prompt. Please enter again.")
             continue
 
-        # 1) 왜곡 여부 판별
+        # Stage 1: Classify the prompt for distortion.
         distortion_label, conf = classify_prompt(user_prompt, cls_tokenizer, cls_model)
-        print(f"\n[분류 결과] {distortion_label} (신뢰도: {conf:.3f})")
+        print(f"\n[Classification Result] {distortion_label} (Confidence: {conf:.3f})")
 
-        print("→ LLM이 교정된 질문을 생성하는 중입니다...")
+        print("→ LLM is generating the rewritten prompt...")
 
-        # 2) 교정된 질문 생성 (답변 X)
+        # Stage 2: Generate the rewritten prompt based on the classification.
+        # The LLM is instructed to either refine a normal prompt or correct an abnormal one.
         rewritten = generate_rewritten_prompt(user_prompt, distortion_label)
 
-        print("\n=== 교정된 질문 ===")
+        print("\n=== Rewritten Prompt ===")
         print(rewritten)
