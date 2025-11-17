@@ -111,3 +111,6 @@ python moderator_guard/prompt_rewriter_app.py
 - **`classifier/core.py`**: `guard_classify` 함수를 통해 3단계 분류 로직을 수행하는 핵심 모듈입니다.
 - **`training/train_classifier.py`**: NLI 분류기 모델을 학습하고 저장하는 스크립트입니다.
 - **`prompt_rewriter_app.py`**: 분류기와 생성 모델(Llama)을 결합하여 전체 파이프라인을 실행하는 메인 애플리케이션입니다.
+  
+6. 기여 (Contributing)
+버그 리포트, 기능 제안 및 개선을 위한 Pull Request는 언제나 환영합니다.
