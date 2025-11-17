@@ -1,2 +1,26 @@
-# real Moderation.py
-/src/Moderation
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+.venv/
+
+# Environment variables
+.env
+
+# Generated data files
+# These are created by scripts/train.py
+data/fact.json
+data/fact_embeddings.npy
+data/nli_contradict_classifier.joblib
+data/nli_pair_embeddings.npy
+data/nli_pair_labels.npy
+
+# IDE / Editor specific
+.vscode/
+.idea/
+*.swp
+*.swo
